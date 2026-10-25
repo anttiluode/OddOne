@@ -175,9 +175,41 @@ where things move in the hidden half. Let it learn for a few minutes while
 things happen *only* on the hidden side: walk by, switch a lamp on and off,
 move a bright object. Then freeze, press `c`, and press `h`.
 
+## Side dish: `aifilter.py`, roll into another identity
+
+Not the experiment, just a trick. The old "prompt yourself into someone else"
+filter: your webcam frame goes through SD-Turbo image-to-image with a text
+prompt. Your pose, movement and the room's light stay yours; the identity
+painted over them is whatever you type.
+
+The twist: a new prompt doesn't jump, it **rolls**. The text embedding slides
+from the old identity to the new one over a few dozen frames, so you watch
+yourself melt from a sea captain into a brass robot into a marble statue.
+
+```bash
+pip install torch diffusers transformers accelerate   # CUDA build of torch for the GPU
+python aifilter.py              # first run downloads SD-Turbo (~2.5 GB)
+python aifilter.py --fake       # no model: tests the window and keys
+```
+
+Type a new identity in the console and press Enter. In the window: `n` next
+preset, `[` `]` strength, `,` `.` roll speed, `t` temporal smoothing,
+`space` raw camera, `s` snapshot, `q` quit. On an RTX 3060 expect a few
+frames per second at 512×512.
+
+How it stays steady: the same noise seed every frame, so the identity doesn't
+flicker while you move, plus optional blending with the previous frame.
+
+How it relates to the lens above: it doesn't read anything. The lens has to
+earn every pixel from the visible half; the filter keeps your geometry and
+**invents** the identity from the prompt. It's the same split the hand
+mystery came down to: geometry from the signal, appearance from memory. Here
+the memory is a diffusion model and you choose which identity it replays.
+
 ## Files
 
 - `oddone.py`: the app (linear lens, optional CNN lens, honest scoring, channel count)
+- `aifilter.py`: the side dish, live identity-rolling filter (SD-Turbo)
 - `sim_occluder.py`: the singular-value simulation and plot
 - `diagnose.py`: synthetic battery and live diagnosis with automatic verdicts
 - `diagnose_synthetic.json`: the reference battery run

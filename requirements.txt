@@ -3,3 +3,7 @@ opencv-python>=4.8
 matplotlib>=3.7
 # optional, for the CNN lens:
 # torch
+# optional, for aifilter.py (the identity-rolling side dish):
+# diffusers
+# transformers
+# accelerate
