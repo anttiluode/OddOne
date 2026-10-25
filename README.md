@@ -1,5 +1,7 @@
 # OddOne
 
+![pic](pic.png)
+
 **Can one half of a webcam image learn to see the other half?**
 
 Split the webcam picture down the middle. The **visible** half is the only
