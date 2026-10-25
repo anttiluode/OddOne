@@ -247,24 +247,29 @@ class Score:
 
 
 def panel(real, pred, info_lines, channels, width):
-    th, tw = 240, 160
+    """Bottom strip: three thumbnails on top, full-width stats and channel bars below."""
+    tw = width // 3
+    th = int(tw * real.shape[0] / real.shape[1])
     r = cv2.resize(real, (tw, th))
     p = cv2.resize(pred, (tw, th))
     e = cv2.resize(np.clip(np.abs(real.astype(int) - pred.astype(int)) * 3, 0, 255).astype(np.uint8), (tw, th))
-    text = np.full((th, width - 3 * tw, 3), 24, np.uint8)
-    for i, line in enumerate(info_lines):
-        cv2.putText(text, line, (8, 22 + 20 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.45, (230, 230, 230), 1, cv2.LINE_AA)
-    if channels is not None:
-        y0 = 22 + 20 * len(info_lines) + 6
-        for i, c in enumerate(channels[:10]):
-            L = int(max(c, 0) * (text.shape[1] - 50))
-            col = (90, 200, 120) if c > 0.5 else (90, 150, 220) if c > 0.3 else (120, 120, 120)
-            cv2.rectangle(text, (40, y0 + 12 * i), (40 + L, y0 + 12 * i + 9), col, -1)
-            cv2.putText(text, f"{c:.2f}", (4, y0 + 12 * i + 9), cv2.FONT_HERSHEY_SIMPLEX, 0.32, (200, 200, 200), 1)
-    out = np.hstack([r, p, e, text])
+    thumbs = np.hstack([r, p, e])
+    thumbs = np.hstack([thumbs, np.zeros((th, width - thumbs.shape[1], 3), np.uint8)])
     for i, label in enumerate(["hidden (real)", "lens", "|error| x3"]):
-        cv2.putText(out, label, (6 + i * tw, 16), cv2.FONT_HERSHEY_SIMPLEX, 0.42, (255, 255, 0), 1, cv2.LINE_AA)
-    return out
+        cv2.putText(thumbs, label, (6 + i * tw, 18), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 255, 0), 1, cv2.LINE_AA)
+    rows = len(info_lines) + (1 if channels is not None else 0)
+    text = np.full((22 * rows + 12, width, 3), 24, np.uint8)
+    for i, line in enumerate(info_lines):
+        cv2.putText(text, line, (10, 22 + 22 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (230, 230, 230), 1, cv2.LINE_AA)
+    if channels is not None:
+        y0 = 22 * len(info_lines) + 6
+        bw = max((width - 20) // max(len(channels[:20]), 1) - 4, 4)
+        for i, c in enumerate(channels[:20]):
+            col = (90, 200, 120) if c > 0.5 else (90, 150, 220) if c > 0.3 else (120, 120, 120)
+            h = int(max(c, 0) * 18)
+            x0 = 10 + i * (bw + 4)
+            cv2.rectangle(text, (x0, y0 + 18 - h), (x0 + bw, y0 + 18), col, -1)
+    return np.vstack([thumbs, text])
 
 
 def try_lock_exposure(cap):
@@ -353,6 +358,8 @@ def main():
             f"channels >0.5: {int((channels > 0.5).sum())}   >0.3: {int((channels > 0.3).sum())}",
         ]
         bottom = panel(hid, pred_img, info, channels, shown.shape[1])
+        if n_frames % 60 == 0:
+            print(f"frames learned {linear.n:6d}   R2 change: linear {s_lin.value():.3f}   cnn {s_cnn.value():.3f}")
         cv2.imshow("OddOne", np.vstack([shown, bottom]))
 
         k = cv2.waitKey(1) & 0xFF
