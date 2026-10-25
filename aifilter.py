@@ -14,15 +14,24 @@ Run
   python aifilter.py                  # Windows: add --dshow if the camera is slow to open
   python aifilter.py --fake           # no model: tests the window and keys with a colour trick
 
+The picture is split down the middle like oddone.py: one half is your
+camera, the other half is the AI version of the same frame, with a yellow
+line between them.
+
 Type a prompt in THIS console and press Enter: the filter rolls into it.
 
-Keys (in the video window)
+Sliders (top of the window)
+  strength %   how much of you is replaced (15 = barely, 95 = almost all)
+  roll frames  how many frames a new identity takes to roll in
+  smooth %     blend with the previous AI frame (steadier, a bit ghostly)
+  AI side      0 = AI on the left, 1 = AI on the right
+  context      0 = the AI sees only its half (about 2x faster)
+               1 = the AI sees the whole frame, so the seam lines up better
+
+Keys
   n        roll to the next preset identity
-  [ / ]    less / more transformation (strength)
-  , / .    slower / faster roll
-  t        temporal smoothing on / off (steadier, a bit ghostly)
-  space    show the raw camera (filter off) / back on
-  s        save a snapshot (raw | filtered) to aifilter_*.png
+  space    AI off (whole picture raw) / back on
+  s        save a snapshot to aifilter_*.png
   q, Esc   quit
 """
 
@@ -48,7 +57,7 @@ PRESETS = [
     "cartoon character portrait, pixar style, 3d render",
 ]
 
-SIZE = 512
+W, H = 640, 480          # both multiples of 8, as the model needs
 
 HF_HELP = """
 Could not load {model} from Hugging Face:
@@ -137,13 +146,6 @@ def lerp(a, b, w):
 # ------------------------------------------------------------------ helpers
 
 
-def square(frame):
-    h, w = frame.shape[:2]
-    s = min(h, w)
-    y0, x0 = (h - s) // 2, (w - s) // 2
-    return cv2.resize(frame[y0:y0 + s, x0:x0 + s], (SIZE, SIZE), interpolation=cv2.INTER_AREA)
-
-
 def console_reader(q):
     while True:
         try:
@@ -154,13 +156,20 @@ def console_reader(q):
             q.put(line.strip())
 
 
-def label(img, lines):
-    out = img.copy()
+def status_panel(lines, width):
+    panel = np.full((22 * len(lines) + 12, width, 3), 24, np.uint8)
     for i, t in enumerate(lines):
-        y = 22 + 22 * i
-        cv2.putText(out, t, (9, y + 1), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 0, 0), 3, cv2.LINE_AA)
-        cv2.putText(out, t, (8, y), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 1, cv2.LINE_AA)
-    return out
+        cv2.putText(panel, t, (10, 22 + 22 * i), cv2.FONT_HERSHEY_SIMPLEX, 0.55,
+                    (230, 230, 230), 1, cv2.LINE_AA)
+    return panel
+
+
+SLIDERS = (("strength %", 50, 95), ("roll frames", 40, 200), ("smooth %", 35, 90),
+           ("AI side", 1, 1), ("context", 0, 1))
+
+
+def slider(name):
+    return cv2.getTrackbarPos(name, "aifilter")
 
 
 # ------------------------------------------------------------------ app
@@ -172,14 +181,14 @@ def main():
     ap.add_argument("--dshow", action="store_true", help="use DirectShow backend (Windows)")
     ap.add_argument("--model", default="stabilityai/sd-turbo")
     ap.add_argument("--token", default=None, help="Hugging Face token (else HF_TOKEN or `hf auth login`)")
-    ap.add_argument("--strength", type=float, default=0.5)
-    ap.add_argument("--roll", type=int, default=40, help="frames to roll from one identity to the next")
     ap.add_argument("--prompt", default=PRESETS[0])
     ap.add_argument("--fake", action="store_true", help="no model, colour trick only (test the app)")
     ap.add_argument("--frames", type=int, default=0, help="stop after N frames (0 = run until q)")
     args = ap.parse_args()
 
     cap = cv2.VideoCapture(args.camera, cv2.CAP_DSHOW) if args.dshow else cv2.VideoCapture(args.camera)
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, W)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, H)
     ok, frame = cap.read()
     if not ok:
         raise SystemExit("Could not read from the camera. Try --camera 1 or --dshow.")
@@ -187,11 +196,15 @@ def main():
     filt = FakeFilter() if args.fake else TurboFilter(args.model, token=args.token)
     print(__doc__)
 
+    cv2.namedWindow("aifilter", cv2.WINDOW_AUTOSIZE)
+    for name, value, top in SLIDERS:
+        cv2.createTrackbar(name, "aifilter", value, top, lambda v: None)
+
     current_prompt = args.prompt
     cur = filt.embed(current_prompt)
     src, dst = cur, cur
-    roll_t, roll_len = 1.0, max(args.roll, 1)
-    strength, smooth, show_raw = args.strength, True, False
+    roll_t = 1.0
+    ai_on = True
     preset_i = PRESETS.index(args.prompt) if args.prompt in PRESETS else -1
     prev = None
     q = queue.Queue()
@@ -207,6 +220,7 @@ def main():
         print(f"rolling into: {prompt}")
 
     n, t_last, fps = 0, time.time(), 0.0
+    shown = None
     while True:
         ok, frame = cap.read()
         if not ok:
@@ -214,33 +228,45 @@ def main():
         while not q.empty():
             start_roll(q.get())
 
+        strength = max(15, slider("strength %")) / 100.0
+        roll_len = max(1, slider("roll frames"))
+        smooth = slider("smooth %") / 100.0
+        ai_right = slider("AI side") == 1
+        whole = slider("context") == 1
+
         if roll_t < 1.0:
             roll_t = min(1.0, roll_t + 1.0 / roll_len)
             w = 0.5 - 0.5 * np.cos(np.pi * roll_t)      # ease in and out
             cur = lerp(src, dst, float(w))
 
-        raw = square(frame)
-        if show_raw:
-            out = raw
-        else:
-            rgb = cv2.cvtColor(raw, cv2.COLOR_BGR2RGB)
+        raw = cv2.resize(frame, (W, H), interpolation=cv2.INTER_AREA)
+        half = W // 2
+        sl = slice(half, W) if ai_right else slice(0, half)
+        shown = raw.copy()
+        if ai_on:
+            src_img = raw if whole else raw[:, sl]
+            rgb = cv2.cvtColor(np.ascontiguousarray(src_img), cv2.COLOR_BGR2RGB)
             res = cv2.cvtColor(filt(rgb, cur, strength), cv2.COLOR_RGB2BGR)
-            if res.shape[:2] != raw.shape[:2]:
-                res = cv2.resize(res, (SIZE, SIZE))
-            if smooth and prev is not None:
-                res = cv2.addWeighted(res, 0.65, prev, 0.35, 0)
-            prev = res
-            out = res
+            if res.shape[:2] != src_img.shape[:2]:
+                res = cv2.resize(res, (src_img.shape[1], src_img.shape[0]))
+            ai_half = res[:, sl] if whole else res
+            if smooth > 0 and prev is not None and prev.shape == ai_half.shape:
+                ai_half = cv2.addWeighted(ai_half, 1 - smooth, prev, smooth, 0)
+            prev = ai_half
+            shown[:, sl] = ai_half
+            cv2.line(shown, (half, 0), (half, H), (0, 255, 255), 1)
 
         n += 1
         if n % 10 == 0:
             now = time.time()
             fps, t_last = 10 / max(now - t_last, 1e-6), now
-        state = "RAW" if show_raw else ("rolling %d%%" % int(100 * roll_t) if roll_t < 1 else "steady")
-        shown = label(out, [current_prompt[:58],
-                            f"{state}   strength {strength:.2f}   roll {roll_len}f   "
-                            f"smooth {'on' if smooth else 'off'}   {fps:.1f} fps"])
-        cv2.imshow("aifilter", np.hstack([raw, shown]))
+        state = ("AI off" if not ai_on else
+                 "rolling %d%%" % int(100 * roll_t) if roll_t < 1 else "steady")
+        info = [current_prompt[:80],
+                f"{state}   AI on the {'right' if ai_right else 'left'}   "
+                f"sees {'whole frame' if whole else 'its half'}   {fps:.1f} fps",
+                "type a new identity in the console | n next preset | space AI off | s save | q quit"]
+        cv2.imshow("aifilter", np.vstack([shown, status_panel(info, W)]))
 
         k = cv2.waitKey(1) & 0xFF
         if k in (ord("q"), 27) or (args.frames and n >= args.frames):
@@ -248,21 +274,11 @@ def main():
         elif k == ord("n"):
             preset_i = (preset_i + 1) % len(PRESETS)
             start_roll(PRESETS[preset_i])
-        elif k == ord("["):
-            strength = max(0.15, round(strength - 0.05, 2))
-        elif k == ord("]"):
-            strength = min(0.95, round(strength + 0.05, 2))
-        elif k == ord(","):
-            roll_len = int(roll_len * 1.5) + 1
-        elif k == ord("."):
-            roll_len = max(1, int(roll_len / 1.5))
-        elif k == ord("t"):
-            smooth, prev = not smooth, None
         elif k == ord(" "):
-            show_raw = not show_raw
+            ai_on, prev = not ai_on, None
         elif k == ord("s"):
             name = f"aifilter_{int(time.time())}.png"
-            cv2.imwrite(name, np.hstack([raw, out]))
+            cv2.imwrite(name, shown)
             print("saved", name)
 
     cap.release()

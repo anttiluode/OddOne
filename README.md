@@ -211,10 +211,13 @@ python aifilter.py --token hf_xxx
 Never commit the token or paste it into a chat. If `hf` isn't found:
 `pip install -U huggingface_hub`.
 
-Type a new identity in the console and press Enter. In the window: `n` next
-preset, `[` `]` strength, `,` `.` roll speed, `t` temporal smoothing,
-`space` raw camera, `s` snapshot, `q` quit. On an RTX 3060 expect a few
-frames per second at 512×512.
+The window is split down the middle like `oddone.py`: one half is your camera,
+the other half is the AI version of the same frame, with a yellow line
+between. Type a new identity in the console and press Enter. Sliders at the
+top: **strength %**, **roll frames**, **smooth %**, **AI side** (left/right) and
+**context** (0: the AI sees only its half, about twice as fast; 1: it sees the
+whole frame, so the seam lines up better). Keys: `n` next preset, `space` AI
+off, `s` snapshot, `q` quit. On an RTX 3060 expect a few frames per second.
 
 How it stays steady: the same noise seed every frame, so the identity doesn't
 flicker while you move, plus optional blending with the previous frame.
