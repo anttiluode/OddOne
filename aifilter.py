@@ -29,6 +29,7 @@ Keys (in the video window)
 from __future__ import annotations
 
 import argparse
+import os
 import queue
 import threading
 import time
@@ -49,6 +50,26 @@ PRESETS = [
 
 SIZE = 512
 
+HF_HELP = """
+Could not load {model} from Hugging Face:
+  {err}
+
+SD-Turbo is a gated model: you need a free Hugging Face account, to accept its
+licence once, and a token on this computer.
+
+  1. Log in at https://huggingface.co and open https://huggingface.co/{model}
+     Click "Agree and access repository".
+  2. Make a token: https://huggingface.co/settings/tokens
+     -> "Create new token", type "Read". Copy it (starts with hf_).
+  3. Give it to this computer, ONE of these:
+       hf auth login                       (paste the token; remembered for good)
+       set HF_TOKEN=hf_xxx                 (Windows cmd, this window only)
+       python aifilter.py --token hf_xxx   (this run only)
+
+Never commit the token to git or paste it into a chat.
+Want to test the window without any model?  python aifilter.py --fake
+"""
+
 
 # ------------------------------------------------------------------ the filter
 
@@ -56,7 +77,7 @@ SIZE = 512
 class TurboFilter:
     """SD-Turbo img2img with prompt-embedding interpolation (the roll)."""
 
-    def __init__(self, model="stabilityai/sd-turbo", steps=2, seed=1234):
+    def __init__(self, model="stabilityai/sd-turbo", steps=2, seed=1234, token=None):
         import torch
         from diffusers import AutoPipelineForImage2Image
 
@@ -66,8 +87,12 @@ class TurboFilter:
         if dev == "cpu":
             print("No CUDA GPU found: this will be very slow on CPU.")
         print(f"Loading {model} on {dev} (first run downloads ~2.5 GB)...")
-        self.pipe = AutoPipelineForImage2Image.from_pretrained(
-            model, torch_dtype=dtype, variant="fp16" if dev == "cuda" else None)
+        token = token or os.environ.get("HF_TOKEN") or None
+        try:
+            self.pipe = AutoPipelineForImage2Image.from_pretrained(
+                model, torch_dtype=dtype, variant="fp16" if dev == "cuda" else None, token=token)
+        except OSError as e:
+            raise SystemExit(HF_HELP.format(model=model, err=str(e).splitlines()[0])) from None
         self.pipe = self.pipe.to(dev)
         self.pipe.set_progress_bar_config(disable=True)
         self.dev, self.steps, self.seed = dev, steps, seed
@@ -146,6 +171,7 @@ def main():
     ap.add_argument("--camera", type=int, default=0)
     ap.add_argument("--dshow", action="store_true", help="use DirectShow backend (Windows)")
     ap.add_argument("--model", default="stabilityai/sd-turbo")
+    ap.add_argument("--token", default=None, help="Hugging Face token (else HF_TOKEN or `hf auth login`)")
     ap.add_argument("--strength", type=float, default=0.5)
     ap.add_argument("--roll", type=int, default=40, help="frames to roll from one identity to the next")
     ap.add_argument("--prompt", default=PRESETS[0])
@@ -158,7 +184,7 @@ def main():
     if not ok:
         raise SystemExit("Could not read from the camera. Try --camera 1 or --dshow.")
 
-    filt = FakeFilter() if args.fake else TurboFilter(args.model)
+    filt = FakeFilter() if args.fake else TurboFilter(args.model, token=args.token)
     print(__doc__)
 
     current_prompt = args.prompt

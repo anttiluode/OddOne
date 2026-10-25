@@ -192,6 +192,25 @@ python aifilter.py              # first run downloads SD-Turbo (~2.5 GB)
 python aifilter.py --fake       # no model: tests the window and keys
 ```
 
+**First time: the Hugging Face token.** SD-Turbo is gated, so the first run
+fails with "not a valid model identifier" until you do this once:
+
+1. Log in at [huggingface.co](https://huggingface.co), open
+   [stabilityai/sd-turbo](https://huggingface.co/stabilityai/sd-turbo) and
+   click **Agree and access repository**.
+2. Create a token at [huggingface.co/settings/tokens](https://huggingface.co/settings/tokens)
+   (type **Read**). It starts with `hf_`.
+3. Give it to your computer, one of:
+
+```bash
+hf auth login                  # paste the token once; it is remembered
+set HF_TOKEN=hf_xxx            # Windows cmd, this window only (bash: export HF_TOKEN=hf_xxx)
+python aifilter.py --token hf_xxx
+```
+
+Never commit the token or paste it into a chat. If `hf` isn't found:
+`pip install -U huggingface_hub`.
+
 Type a new identity in the console and press Enter. In the window: `n` next
 preset, `[` `]` strength, `,` `.` roll speed, `t` temporal smoothing,
 `space` raw camera, `s` snapshot, `q` quit. On an RTX 3060 expect a few
