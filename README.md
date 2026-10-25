@@ -106,6 +106,56 @@ which you're seeing:
 5. **Linear vs CNN.** If the CNN wins only on familiar scenes and loses on
    novel ones, the extra was habit, not sight.
 
+## Automatic diagnosis: `diagnose.py`
+
+```bash
+python diagnose.py              # synthetic battery, ~10 min on CPU (add --no-cnn to skip the CNN)
+python diagnose.py --live 120   # your camera: learn 90 s, then freeze and test 30 s
+```
+
+Both write a JSON report (`diagnose_synthetic.json` / `diagnose_live.json`)
+with an automatic verdict. For the live run: keep everything that moves in the
+**right** half, and nothing crossing the yellow line.
+
+Every run is scored on frozen test frames the lens never learned from, against
+controls: a lens that only sees the visible half's average colour, a lens
+trained on time-shuffled pairs, R² at four resolutions, the channel count,
+motion at the midline, how much of the visible change is one global brightness
+factor, and how much of the test input is unlike anything seen in training.
+
+### The synthetic battery (scenes with known answers)
+
+| scene | R² full res | R² at 1/8 res | verdict |
+|---|---:|---:|---|
+| independent (control) | −0.02 | −0.07 | no usable leak |
+| glow (bare wall) | 0.05 | 0.55 | reading, coarse |
+| shadow (pole edge) | 0.13 | 0.73 | reading, more than glow at every scale |
+| crosser | 0.96 | 0.99 | continuation |
+| exposure | 0.99 | 0.97 | global brightness / auto-exposure |
+| novel colour | −10.5 | −6.9 | unfamiliar input: the lens extrapolates badly |
+
+What the battery taught, and what it changed:
+
+- **It caught a real bug.** The first version of the lens used a ridge scaled
+  to the *average* eigenvalue. In a mostly static room nearly all variation
+  sits in a few directions, so that ridge was tiny and the lens amplified
+  sensor noise: R² around −46 on unseen frames. The lens now keeps six ridge
+  strengths and lets every new frame vote on which predicts best before it
+  learns from that frame. The best choice varied by four orders of magnitude
+  between scenes.
+- **The physics prediction held.** A smooth wall tells you *roughly where* the
+  light is (R² 0.55 at 1/8 resolution, near 0 at full); an edge passes more at
+  every scale. The app now shows a coarse (1/4) score beside the full one.
+- **A linear lens does not generalise to light of a new colour.** Trained only
+  on blue light, it fails badly on orange. Honest limit: what it learned is
+  this room *with these lights*. The novelty meter flags it.
+- Two detectors were wrong in the first run and were fixed: motion is now
+  counted only above sensor noise, and exposure is detected by whether the
+  visible half's change is a single global brightness factor (the first
+  heuristic assumed the halves' brightness changes anti-correlate; they
+  don't). The novelty threshold was lowered from 20% to 10% **after** seeing the
+  novel scene sit at 19%; the control sits at 7.5%.
+
 ## The exposure trap
 
 A webcam's **auto-exposure** reacts to the whole image. When something bright
@@ -127,6 +177,8 @@ move a bright object. Then freeze, press `c`, and press `h`.
 
 - `oddone.py`: the app (linear lens, optional CNN lens, honest scoring, channel count)
 - `sim_occluder.py`: the singular-value simulation and plot
+- `diagnose.py`: synthetic battery and live diagnosis with automatic verdicts
+- `diagnose_synthetic.json`: the reference battery run
 - `tests/`: the linear lens reads a known linear leak (R² > 0.8), does **not**
   hallucinate from unrelated input (R² < 0.1), the channel count recovers a
   known 3-channel leak, and an edge passes over 10× more than a bare wall

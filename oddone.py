@@ -59,18 +59,37 @@ def unvec(v, shape_hw, size=(LW, LH)):
     return cv2.resize(small, (shape_hw[1], shape_hw[0]), interpolation=cv2.INTER_CUBIC)
 
 
+def coarse(v, f):
+    """Blur a lens-resolution vector (or a stack of them) to 1/f resolution, keeping its size."""
+    stack = np.atleast_2d(v)
+    out = []
+    for row in stack:
+        img = row.reshape(LH, LW, 3).astype(np.float32)
+        small = cv2.resize(img, (max(LW // f, 1), max(LH // f, 1)), interpolation=cv2.INTER_AREA)
+        out.append(cv2.resize(small, (LW, LH), interpolation=cv2.INTER_LINEAR).ravel())
+    out = np.array(out)
+    return out[0] if np.ndim(v) == 1 else out
+
+
 # ------------------------------------------------------------------ linear lens
 
 
 class LinearLens:
-    """x_hat = mean_x + W (y - mean_y), W = C_xy (C_yy + ridge)^-1, from forgetting running sums.
+    """Linear MMSE lens with self-chosen regularisation.
 
-    The solve for W runs in a background thread so the camera loop never waits.
+    x_hat = mean_x + W_lam (y - mean_y),  W_lam = C_xy (C_yy + lam I)^-1, for several
+    ridge strengths lam (relative to the largest eigenvalue of C_yy). Every new frame
+    is first used to SCORE each lam (prequentially), then learned from; predictions
+    use the lam with the lowest running error. A static room concentrates almost all
+    variation in a few directions, so a fixed ridge either amplifies sensor noise or
+    throws away real signal; letting the data choose avoids both.
     """
 
-    def __init__(self, din, dout, forget=0.9995, ridge=1e-2, solve_every=30, background=True):
+    RIDGES = (1e-4, 1e-3, 1e-2, 1e-1, 1.0, 10.0)
+
+    def __init__(self, din, dout, forget=0.9995, solve_every=45, background=True):
         self.din, self.dout = din, dout
-        self.forget, self.ridge, self.solve_every = forget, ridge, solve_every
+        self.forget, self.solve_every = forget, solve_every
         self.background = background
         self._thread = None
         self.reset()
@@ -87,8 +106,14 @@ class LinearLens:
         self.sx = np.zeros(self.dout, np.float32)
         self.syy = np.zeros((self.din, self.din), np.float32)
         self.sxy = np.zeros((self.dout, self.din), np.float32)
-        self.W = np.zeros((self.dout, self.din), np.float32)
+        self.Ws = None
+        self.err = np.zeros(len(self.RIDGES))
+        self.best = len(self.RIDGES) - 1
         self.n = 0
+
+    @property
+    def ridge(self):
+        return self.RIDGES[self.best]
 
     def means(self):
         w = max(self.w, 1e-9)
@@ -96,12 +121,20 @@ class LinearLens:
 
     def predict(self, y):
         my, mx = self.means()
-        return mx + self.W @ (y - my)
+        if self.Ws is None:
+            return mx.copy()
+        return mx + self.Ws[self.best] @ (y - my)
 
     def learn(self, y, x):
-        f = self.forget
         y = y.astype(np.float32, copy=False)
         x = x.astype(np.float32, copy=False)
+        if self.Ws is not None:                       # score every ridge on this unseen frame
+            my, mx = self.means()
+            dy = y - my
+            e = np.sum(((x - mx)[None] - self.Ws @ dy) ** 2, axis=1)
+            self.err = 0.98 * self.err + 0.02 * e if self.err.any() else e
+            self.best = int(np.argmin(self.err))
+        f = self.forget
         self.w = f * self.w + 1
         self.sy *= f
         self.sy += y
@@ -112,7 +145,7 @@ class LinearLens:
         self.sxy *= f
         self.sxy += np.outer(x, y)
         self.n += 1
-        if self.n % self.solve_every == 0 and self.n > 20:
+        if self.n % self.solve_every == 0 and self.n > 30:
             if not self.background:
                 self.solve()
             elif self._thread is None or not self._thread.is_alive():
@@ -123,19 +156,24 @@ class LinearLens:
     def solve(self, snap=None):
         w, sy, sx, syy, sxy = snap if snap is not None else (self.w, self.sy, self.sx, self.syy, self.sxy)
         my, mx = sy / w, sx / w
-        cyy = syy / w - np.outer(my, my)
-        cxy = sxy / w - np.outer(mx, my)
-        lam = self.ridge * float(np.trace(cyy)) / self.din + 1e-8
-        self.W = np.linalg.solve(cyy + lam * np.eye(self.din, dtype=np.float32), cxy.T).T.astype(np.float32)
+        cyy = (syy / w - np.outer(my, my)).astype(np.float64)
+        cxy = (sxy / w - np.outer(mx, my)).astype(np.float64)
+        e, V = np.linalg.eigh(cyy)
+        e = np.clip(e, 0, None)
+        A = cxy @ V
+        top = max(float(e.max()), 1e-12)
+        self.Ws = np.stack([((A / (e + r * top)) @ V.T).astype(np.float32) for r in self.RIDGES])
 
     def state(self):
-        return dict(w=self.w, sy=self.sy, sx=self.sx, syy=self.syy, sxy=self.sxy, n=self.n)
+        return dict(w=self.w, sy=self.sy, sx=self.sx, syy=self.syy, sxy=self.sxy, n=self.n,
+                    err=self.err, best=self.best)
 
     def load(self, d):
         self.w = float(d["w"])
         self.sy, self.sx = d["sy"].astype(np.float32), d["sx"].astype(np.float32)
         self.syy, self.sxy = d["syy"].astype(np.float32), d["sxy"].astype(np.float32)
         self.n = int(d["n"])
+        self.err, self.best = d["err"], int(d["best"])
         self.solve()
 
 
@@ -302,7 +340,7 @@ def main():
             cnn = CnnLens()
         except Exception as e:  # torch missing or broken
             print("CNN lens unavailable:", e)
-    s_lin, s_cnn = Score(), Score()
+    s_lin, s_cnn, s_lin4 = Score(), Score(), Score()
     buf = deque(maxlen=3000)
     learning, hide, mode = True, False, "linear"
     channels, n_frames, t_last, fps = None, 0, time.time(), 0.0
@@ -320,6 +358,8 @@ def main():
         _, mx = linear.means()
         if linear.n > 50:
             s_lin.add(float(np.sum((x - pred_lin) ** 2)), float(np.sum((x - mx) ** 2)))
+            xc, pc4, mc = coarse(x, 4), coarse(pred_lin, 4), coarse(mx, 4)
+            s_lin4.add(float(np.sum((xc - pc4) ** 2)), float(np.sum((xc - mc) ** 2)))
         pred_lin_img = unvec(pred_lin, hid.shape[:2])
         pred_cnn_img = None
         if cnn is not None and cnn.bg_x is not None:
@@ -350,8 +390,8 @@ def main():
             t_last = now
         info = [
             f"learning: {'ON' if learning else 'off'}   lens: {mode}   fps {fps:.0f}",
-            f"frames learned: {linear.n}",
-            f"R2 of change, linear: {s_lin.value():.3f}",
+            f"frames learned: {linear.n}   ridge chosen: {linear.ridge:g}",
+            f"R2 of change, linear: {s_lin.value():.3f}   coarse (1/4 res): {s_lin4.value():.3f}",
             f"R2 of change, cnn:    {s_cnn.value():.3f}" if cnn else "cnn: unavailable",
             "0 = no better than the usual look",
             "channels (press c): held-out corr." if channels is None else
@@ -359,7 +399,8 @@ def main():
         ]
         bottom = panel(hid, pred_img, info, channels, shown.shape[1])
         if n_frames % 60 == 0:
-            print(f"frames learned {linear.n:6d}   R2 change: linear {s_lin.value():.3f}   cnn {s_cnn.value():.3f}")
+            print(f"frames learned {linear.n:6d}   R2 change: linear {s_lin.value():.3f} "
+                  f"(coarse {s_lin4.value():.3f}, ridge {linear.ridge:g})   cnn {s_cnn.value():.3f}")
         cv2.imshow("OddOne", np.vstack([shown, bottom]))
 
         k = cv2.waitKey(1) & 0xFF
@@ -383,7 +424,7 @@ def main():
             print("auto-exposure before/after:", try_lock_exposure(cap))
         elif k == ord("r"):
             linear.reset()
-            s_lin, s_cnn = Score(), Score()
+            s_lin, s_cnn, s_lin4 = Score(), Score(), Score()
             buf.clear()
             channels = None
             if cnn is not None:
